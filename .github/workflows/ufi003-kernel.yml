@@ -33,6 +33,7 @@ jobs:
           make defconfig
           make download -j4
       - name: Restore public build toolchain cache
+        id: toolchain-cache
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -45,10 +46,22 @@ jobs:
         run: |
           set -euo pipefail
           cd openwrt
-          make tools/install -j4 V=s
-          make toolchain/install -j4 V=s
-          make package/system/apk/host/compile -j4 V=s
+          if [ '${{ steps.toolchain-cache.outputs.cache-hit }}' != true ]; then
+            make tools/install -j4 V=s
+            make toolchain/install -j4 V=s
+            make package/system/apk/host/compile -j4 V=s
+          fi
+          # The cache contains a previously built pinned GCC and APK host tool.
+          # Verify the binaries directly; rerunning install targets needlessly rebuilds GCC.
+          cross=$(find "$PWD/staging_dir" -path '*/bin/aarch64-openwrt-linux-musl-gcc' | head -n1)
+          test -x "$cross"
+          test "$("$cross" -dumpfullversion)" = 14.3.0
+          export STAGING_DIR="$(dirname "$(dirname "$cross")")"
+          printf '#include <stdint.h>\nuint64_t ufi_toolchain_probe(uint64_t n) { return n + 1; }\n' | "$cross" -x c -c -o ../toolchain-probe.o -
+          "${cross%gcc}readelf" -h ../toolchain-probe.o | grep -q AArch64
           test -x staging_dir/host/bin/apk
+          staging_dir/host/bin/apk --version
+          test -x staging_dir/host/bin/mkhash
       - name: Cache public build toolchain
         uses: actions/cache/save@v4
         with:
@@ -104,7 +117,7 @@ jobs:
           cp "$kernel_dir/.vermagic" ../kernel-artifact/kernel-abi-hash.txt
           # Do not upload or package modules_install's build/source symlinks.
           find ../kernel-artifact -type l -delete
-      - name: Build matching wireless backports
+      - name: Build matching external modules
         run: |
           set -euo pipefail
           mkdir -p build-diagnostics
@@ -112,6 +125,7 @@ jobs:
           # Toolchain and kernel are already built; avoid package dependencies rebuilding kernel config.
           # Intermediate APKs are not installed or distributed; the output is audited raw modules.
           make package/kernel/mac80211/compile NO_DEPS=1 CONFIG_SIGN_EACH_PACKAGE= -j4 V=s 2>&1 | tee ../build-diagnostics/mac80211.log
+          make package/network/utils/fullconenat-nft/compile NO_DEPS=1 CONFIG_SIGN_EACH_PACKAGE= -j4 V=s 2>&1 | tee ../build-diagnostics/nft-fullcone.log
           # Package build must preserve the same kernel release and configuration.
           kernel_dir=build_dir/target-aarch64_generic_musl/linux-msm89xx_msm8916/linux-6.12.85
           cmp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
@@ -121,6 +135,11 @@ jobs:
             install -D "$module" "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
             "${prefix}strip" --strip-debug "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
           done
+          fullcone=$(find build_dir -path '*/fullconenat-nft*/src/nft_fullcone.ko' -type f)
+          test -n "$fullcone"
+          test "$(printf '%s\n' "$fullcone" | wc -l)" -eq 1
+          install -D "$fullcone" ../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/nft_fullcone.ko
+          "${prefix}strip" --strip-debug ../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/nft_fullcone.ko
       - name: Validate and package
         run: |
           set -eux
