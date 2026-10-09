@@ -2,7 +2,7 @@ name: UFI003 IPsec kernel experiment
 on:
   push:
     branches: [ufi003-ipsec-build]
-    paths: [build-inputs/**]
+    paths: [build-inputs/**, .github/workflows/ufi003-kernel.yml]
 permissions:
   contents: read
 concurrency:
@@ -32,18 +32,43 @@ jobs:
           cp ../build-inputs/openwrt.config .config
           make defconfig
           make download -j4
-      - name: Build toolchain and prepare kernel
+      - name: Restore public build toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/build_dir/host
+            openwrt/build_dir/toolchain-*
+            openwrt/staging_dir/host
+            openwrt/staging_dir/toolchain-*
+          key: ufi003-public-toolchain-7fe583d96e-gcc14.3-v1
+      - name: Build toolchain and package tooling
         run: |
+          set -euo pipefail
           cd openwrt
           make tools/install -j4 V=s
           make toolchain/install -j4 V=s
+          make package/system/apk/host/compile -j4 V=s
+          test -x staging_dir/host/bin/apk
+      - name: Cache public build toolchain
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/build_dir/host
+            openwrt/build_dir/toolchain-*
+            openwrt/staging_dir/host
+            openwrt/staging_dir/toolchain-*
+          key: ufi003-public-toolchain-7fe583d96e-gcc14.3-v1
+      - name: Prepare UFI003 target kernel
+        run: |
+          cd openwrt
           make target/linux/prepare V=s
       - name: Apply original kernel configuration plus IMS capabilities
         run: |
           set -eux
           cd openwrt
-          kernel_dir=$(find build_dir -type d -name linux-6.12.85 | head -n1)
+          kernel_dir=build_dir/target-aarch64_generic_musl/linux-msm89xx_msm8916/linux-6.12.85
           test -n "$kernel_dir"
+          test -f "$kernel_dir/Makefile"
           gzip -dc ../build-inputs/linux.config.gz > "$kernel_dir/.config"
           "$kernel_dir/scripts/config" --file "$kernel_dir/.config" \
             --enable XFRM_USER --enable INET_ESP --enable INET6_ESP \
@@ -69,19 +94,27 @@ jobs:
           cp "$kernel_dir/.config" "$kernel_dir/.config.prev"
           cp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
           make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= -j4 Image modules
-          make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= INSTALL_MOD_PATH="$PWD/../kernel-artifact" modules_install
+          make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= INSTALL_MOD_STRIP=1 INSTALL_MOD_PATH="$PWD/../kernel-artifact" modules_install
           cp "$kernel_dir/arch/arm64/boot/Image" ../kernel-artifact/Image
           cp "$kernel_dir/System.map" ../kernel-artifact/System.map
+          # Do not upload or package modules_install's build/source symlinks.
+          find ../kernel-artifact -type l -delete
       - name: Build matching wireless backports
         run: |
+          set -euo pipefail
+          mkdir -p build-diagnostics
           cd openwrt
           # Toolchain and kernel are already built; avoid package dependencies rebuilding kernel config.
-          make package/kernel/mac80211/compile NO_DEPS=1 -j4 V=s
+          # Intermediate APKs are not installed or distributed; the output is audited raw modules.
+          make package/kernel/mac80211/compile NO_DEPS=1 CONFIG_SIGN_EACH_PACKAGE= -j4 V=s 2>&1 | tee ../build-diagnostics/mac80211.log
           # Package build must preserve the same kernel release and configuration.
-          kernel_dir=$(find build_dir -type d -name linux-6.12.85 | head -n1)
+          kernel_dir=build_dir/target-aarch64_generic_musl/linux-msm89xx_msm8916/linux-6.12.85
           cmp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
+          cross=$(find "$PWD/staging_dir" -path '*/bin/aarch64-openwrt-linux-musl-gcc' | head -n1)
+          prefix=${cross%gcc}
           find build_dir -path '*/backports-*/*.ko' -print0 | while IFS= read -r -d '' module; do
             install -D "$module" "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
+            "${prefix}strip" --strip-debug "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
           done
       - name: Validate and package
         run: |
@@ -122,6 +155,7 @@ jobs:
           name: ufi003-build-diagnostics
           path: |
             openwrt/logs
+            build-diagnostics
             openwrt/.config
             build-inputs/resolved-linux.config
             kernel-artifact
