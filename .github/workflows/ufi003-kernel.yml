@@ -6,7 +6,7 @@ permissions:
   contents: read
 concurrency:
   group: ufi003-ipsec-kernel
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   kernel:
     runs-on: ubuntu-24.04
@@ -74,7 +74,8 @@ jobs:
       - name: Build matching wireless backports
         run: |
           cd openwrt
-          make package/kernel/mac80211/compile -j4 V=s
+          # Toolchain and kernel are already built; avoid package dependencies rebuilding kernel config.
+          make package/kernel/mac80211/compile NO_DEPS=1 -j4 V=s
           # Package build must preserve the same kernel release and configuration.
           kernel_dir=$(find build_dir -type d -name linux-6.12.85 | head -n1)
           cmp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
@@ -98,9 +99,10 @@ jobs:
           from pathlib import Path
           expected = set(Path('build-inputs/expected-modules.txt').read_text().splitlines())
           actual = {p.name for p in Path('kernel-artifact').rglob('*.ko')}
-          missing = expected - actual
+          builtin = {Path(line).name for line in Path('kernel-artifact/lib/modules/6.12.85-ufi-ims/modules.builtin').read_text().splitlines()}
+          missing = expected - actual - builtin
           assert not missing, f'Missing rebuilt modules: {sorted(missing)}'
-          print(f'All {len(expected)} original modules rebuilt; {len(actual)} available')
+          print(f'All {len(expected)} original modules covered: {len(expected & actual)} modules, {len(expected & builtin)} built in')
           PY
           depmod -b "$PWD/kernel-artifact" -F kernel-artifact/System.map 6.12.85-ufi-ims
           tar -czf ufi003-ipsec-kernel-experiment.tar.gz -C kernel-artifact .
@@ -121,4 +123,5 @@ jobs:
             openwrt/logs
             openwrt/.config
             build-inputs/resolved-linux.config
+            kernel-artifact
           retention-days: 7
