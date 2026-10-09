@@ -1,0 +1,36 @@
+name: Inspect UFI003 kernel build diagnostics
+on:
+  push:
+    branches: [ufi003-ipsec-build]
+    paths: [.github/workflows/ufi003-diagnostics.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read completed public build log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL --retry 2 -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/raysuids/codex-router/actions/jobs/113728180777/logs -o job.log
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          lines=Path('job.log').read_text(errors='replace').splitlines()
+          selected=[]
+          for n,line in enumerate(lines):
+              if re.search(r'kernel_dir=|No rule to make|fatal error:|Error [0-9]|error:|not found|undefined reference',line):
+                  selected.extend(lines[max(0,n-2):min(len(lines),n+4)])
+          unique=list(dict.fromkeys(selected))
+          text='\n'.join(unique[-160:])+'\n'
+          Path('kernel-build-errors.txt').write_text(text)
+          print(text)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ufi003-concise-build-diagnostics
+          path: kernel-build-errors.txt
+          retention-days: 7

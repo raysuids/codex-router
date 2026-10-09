@@ -2,6 +2,7 @@ name: UFI003 IPsec kernel experiment
 on:
   push:
     branches: [ufi003-ipsec-build]
+    paths: [build-inputs/**]
 permissions:
   contents: read
 concurrency:
