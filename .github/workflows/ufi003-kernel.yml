@@ -92,11 +92,16 @@ jobs:
           make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= olddefconfig
           cp "$kernel_dir/.config" "$kernel_dir/.config.set"
           cp "$kernel_dir/.config" "$kernel_dir/.config.prev"
+          # Kernel/Configure/Default normally creates the ABI hash used by APK dependencies.
+          # The manual kernel build preserves the live baseline config, so apply its exact rule here.
+          grep '=[ym]' "$kernel_dir/.config.set" | LC_ALL=C sort | staging_dir/host/bin/mkhash md5 > "$kernel_dir/.vermagic"
+          test "$(wc -c < "$kernel_dir/.vermagic")" -eq 33
           cp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
           make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= -j4 Image modules
           make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= INSTALL_MOD_STRIP=1 INSTALL_MOD_PATH="$PWD/../kernel-artifact" modules_install
           cp "$kernel_dir/arch/arm64/boot/Image" ../kernel-artifact/Image
           cp "$kernel_dir/System.map" ../kernel-artifact/System.map
+          cp "$kernel_dir/.vermagic" ../kernel-artifact/kernel-abi-hash.txt
           # Do not upload or package modules_install's build/source symlinks.
           find ../kernel-artifact -type l -delete
       - name: Build matching wireless backports
