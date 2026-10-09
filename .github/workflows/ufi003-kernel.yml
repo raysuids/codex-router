@@ -31,7 +31,8 @@ jobs:
           ./scripts/feeds install -a
           cp ../build-inputs/openwrt.config .config
           make defconfig
-          make download -j4
+          # Each prepare/build target fetches its pinned, hash-checked prerequisites.
+          # Avoid downloading every selected userspace package for a kernel-only build.
       - name: Restore public build toolchain cache
         id: toolchain-cache
         uses: actions/cache/restore@v4
@@ -125,16 +126,24 @@ jobs:
           # Toolchain and kernel are already built; avoid package dependencies rebuilding kernel config.
           # Intermediate APKs are not installed or distributed; the output is audited raw modules.
           make package/kernel/mac80211/compile NO_DEPS=1 CONFIG_SIGN_EACH_PACKAGE= -j4 V=s 2>&1 | tee ../build-diagnostics/mac80211.log
-          make package/network/utils/fullconenat-nft/compile NO_DEPS=1 CONFIG_SIGN_EACH_PACKAGE= -j4 V=s 2>&1 | tee ../build-diagnostics/nft-fullcone.log
           # Package build must preserve the same kernel release and configuration.
           kernel_dir=build_dir/target-aarch64_generic_musl/linux-msm89xx_msm8916/linux-6.12.85
           cmp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
           cross=$(find "$PWD/staging_dir" -path '*/bin/aarch64-openwrt-linux-musl-gcc' | head -n1)
           prefix=${cross%gcc}
+          export STAGING_DIR="$(dirname "$(dirname "$cross")")"
           find build_dir -path '*/backports-*/*.ko' -print0 | while IFS= read -r -d '' module; do
             install -D "$module" "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
             "${prefix}strip" --strip-debug "../kernel-artifact/lib/modules/6.12.85-ufi-ims/extra/$(basename "$module")"
           done
+          # Prepare the package's pinned source and patches, then use standard Kbuild.
+          # Raw modules do not require intermediate APK dependency metadata.
+          make package/network/utils/fullconenat-nft/prepare NO_DEPS=1 -j4 V=s 2>&1 | tee ../build-diagnostics/nft-fullcone-prepare.log
+          fullcone_src=$(find build_dir -path '*/fullconenat-nft*/src' -type d)
+          test -n "$fullcone_src"
+          test "$(printf '%s\n' "$fullcone_src" | wc -l)" -eq 1
+          make -C "$kernel_dir" ARCH=arm64 CROSS_COMPILE="$prefix" LOCALVERSION= M="$PWD/$fullcone_src" -j4 modules 2>&1 | tee ../build-diagnostics/nft-fullcone.log
+          cmp "$kernel_dir/.config" ../build-inputs/resolved-linux.config
           fullcone=$(find build_dir -path '*/fullconenat-nft*/src/nft_fullcone.ko' -type f)
           test -n "$fullcone"
           test "$(printf '%s\n' "$fullcone" | wc -l)" -eq 1
@@ -162,7 +171,8 @@ jobs:
           assert not missing, f'Missing rebuilt modules: {sorted(missing)}'
           print(f'All {len(expected)} original modules covered: {len(expected & actual)} modules, {len(expected & builtin)} built in')
           PY
-          depmod -b "$PWD/kernel-artifact" -F kernel-artifact/System.map 6.12.85-ufi-ims
+          depmod -e -b "$PWD/kernel-artifact" -F kernel-artifact/System.map 6.12.85-ufi-ims 2>&1 | tee kernel-artifact/module-dependencies.log
+          ! grep -E 'needs unknown symbol|disagrees about version|ERROR:' kernel-artifact/module-dependencies.log
           tar -czf ufi003-ipsec-kernel-experiment.tar.gz -C kernel-artifact .
           sha256sum ufi003-ipsec-kernel-experiment.tar.gz > ufi003-ipsec-kernel-experiment.sha256
       - uses: actions/upload-artifact@v4
